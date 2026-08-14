@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import QRCode from 'qrcode';
 import jsQR, { QRCode as JSQRCode } from 'jsqr';
@@ -10,8 +10,12 @@ const VERSION = 1;
 const DEFAULT_CHUNK_SIZE = 350;
 const DEFAULT_FRAME_MS = 140;
 const MAX_FILE_SIZE = 32 * 1024 * 1024;
+const NATIVE_SCAN_INTERVAL_MS = 90;
+const FALLBACK_SCAN_INTERVAL_MS = 130;
 
-type FrameType = 'M' | 'D' | 'E';
+type DetectedBarcode = { rawValue: string };
+type BarcodeDetectorLike = { detect: (source: HTMLVideoElement) => Promise<DetectedBarcode[]> };
+type BarcodeDetectorConstructor = new (options?: { formats?: string[] }) => BarcodeDetectorLike;
 
 type Manifest = {
   t: 'M';
@@ -198,7 +202,11 @@ function Receiver() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
+  const detectorRef = useRef<BarcodeDetectorLike | null>(null);
+  const lastScanAtRef = useRef(0);
+  const scanCountRef = useRef(0);
   const [running, setRunning] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [received, setReceived] = useState<Map<number, Uint8Array>>(new Map());
   const [lastIndex, setLastIndex] = useState<number | null>(null);
@@ -217,7 +225,9 @@ function Receiver() {
     rafRef.current = null;
     streamRef.current?.getTracks().forEach(t => t.stop());
     streamRef.current = null;
+    detectorRef.current = null;
     runningRef.current = false;
+    setStarting(false);
     setRunning(false);
   };
 
@@ -255,32 +265,63 @@ function Receiver() {
     }
   };
 
+  const decodeWithJsQR = (video: HTMLVideoElement, canvas: HTMLCanvasElement) => {
+    const width = Math.min(640, video.videoWidth);
+    const scale = width / video.videoWidth || 1;
+    canvas.width = width;
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code: JSQRCode | null = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+    return code?.data ?? null;
+  };
+
   const scanLoop = async () => {
     const video = videoRef.current; const canvas = canvasRef.current;
     if (!video || !canvas || !runningRef.current) return;
-    if (video.readyState >= 2) {
-      const width = 960; const scale = width / video.videoWidth || 1;
-      canvas.width = width; canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (ctx) {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const code: JSQRCode | null = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
-        setScans(x => x + 1);
-        if (code?.data) { const frame = decodeFrame(code.data); if (frame) await processFrame(frame); }
+    const now = performance.now();
+    const interval = detectorRef.current ? NATIVE_SCAN_INTERVAL_MS : FALLBACK_SCAN_INTERVAL_MS;
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && now - lastScanAtRef.current >= interval) {
+      lastScanAtRef.current = now;
+      let text: string | null = null;
+      try {
+        const detected = detectorRef.current ? await detectorRef.current.detect(video) : [];
+        text = detected[0]?.rawValue ?? null;
+      } catch {
+        detectorRef.current = null;
+        text = null;
       }
+      if (!text && !detectorRef.current) text = decodeWithJsQR(video, canvas);
+      scanCountRef.current += 1;
+      if (scanCountRef.current % 10 === 0) setScans(scanCountRef.current);
+      if (text) { const frame = decodeFrame(text); if (frame) await processFrame(frame); }
     }
     if (runningRef.current) rafRef.current = requestAnimationFrame(scanLoop);
   };
 
   const start = async () => {
+    if (starting || runningRef.current) return;
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      setStatus('Camera access requires HTTPS (or localhost) and a supported browser.');
+      return;
+    }
+    setStarting(true);
+    setStatus('Opening the rear camera…');
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+      const detector = (window as typeof window & { BarcodeDetector?: BarcodeDetectorConstructor }).BarcodeDetector;
+      try { detectorRef.current = detector ? new detector({ formats: ['qr_code'] }) : null; } catch { detectorRef.current = null; }
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
       streamRef.current = stream;
       if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
-        runningRef.current = true; setRunning(true); setStatus('Scanning…');
+      lastScanAtRef.current = 0;
+      scanCountRef.current = 0;
+      setScans(0);
+      runningRef.current = true; setRunning(true); setStarting(false);
+      setStatus(detectorRef.current ? 'Scanning with the phone’s native QR detector…' : 'Scanning with the compatibility QR detector…');
       requestAnimationFrame(scanLoop);
-    } catch (e) { setStatus(`Camera error: ${e instanceof Error ? e.message : 'permission denied'}`); }
+    } catch (e) { setStarting(false); setStatus(`Camera error: ${e instanceof Error ? e.message : 'permission denied'}`); }
   };
 
   const finalize = async () => {
@@ -304,10 +345,10 @@ function Receiver() {
   return <section className="grid">
     <div className="panel controls">
       <h2>Receive a file</h2>
-      <video ref={videoRef} className="camera" playsInline muted /><canvas ref={canvasRef} hidden />
-      <div className="actions"><button onClick={running ? stop : start}>{running ? 'Stop camera' : 'Start camera'}</button><button className="secondary" onClick={() => { setManifest(null); setReceived(new Map()); setResultUrl(null); setStatus('Receiver reset. Ready for another transfer.'); }} >Reset</button></div>
+      <div className="camera-frame"><video ref={videoRef} className="camera" playsInline muted /><div className="scan-guide" aria-hidden="true"><span /></div>{!running && <div className="camera-empty">{starting ? 'Opening rear camera…' : 'Use the rear camera and keep the sender QR inside this frame.'}</div>}</div><canvas ref={canvasRef} hidden />
+      <div className="actions"><button onClick={running ? stop : start} disabled={starting}>{running ? 'Stop camera' : starting ? 'Opening camera…' : 'Start rear camera'}</button><button className="secondary" onClick={() => { setManifest(null); manifestRef.current = null; setReceived(new Map()); setResultUrl(null); setStatus('Receiver reset. Ready for another transfer.'); }} >Reset</button></div>
       <p className="status">{status}</p>
-      {manifest && <><div className="file-card"><strong>{manifest.name}</strong><span>{formatBytes(manifest.originalSize)} original • {manifest.totalChunks.toLocaleString()} chunks</span><span>Unique received: {received.size.toLocaleString()} • Missing: {missingCount.toLocaleString()}</span></div><div className="progress"><div style={{ width: `${progress}%` }} /></div><div className="round-status">Last chunk: <b>{lastIndex ?? '—'}</b> • Camera scan iterations: <b>{scans.toLocaleString()}</b></div></>}
+      {manifest && <><div className="file-card"><strong>{manifest.name}</strong><span>{formatBytes(manifest.originalSize)} original • {manifest.totalChunks.toLocaleString()} chunks</span><span>Unique received: {received.size.toLocaleString()} • Missing: {missingCount.toLocaleString()}</span></div><div className="progress"><div style={{ width: `${progress}%` }} /></div><div className="round-status">Last chunk: <b>{lastIndex ?? '—'}</b> • Decoder attempts: <b>{scans.toLocaleString()}</b></div></>}
       {resultUrl && <a className="download" href={resultUrl} download={manifest?.name}>Download verified file</a>}
     </div>
     <div className="panel explanation"><h2>How reliability works</h2><div className="steps"><div><b>1</b><span>Sender sends every chunk in a round.</span></div><div><b>2</b><span>Receiver stores a chunk only once.</span></div><div><b>3</b><span>Duplicate chunks from later rounds are ignored.</span></div><div><b>4</b><span>When all chunks exist, the compressed stream is rebuilt.</span></div><div><b>5</b><span>SHA-256 of the original file must match before download.</span></div></div><p className="note">This version deliberately favors reliability over peak speed. It does not yet require a return channel or advanced FEC, so a sender can simply repeat the complete stream until the receiver reaches 100%.</p></div>
