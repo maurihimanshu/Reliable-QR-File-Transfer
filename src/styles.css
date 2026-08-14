@@ -24,3 +24,10 @@ h2 { margin: 0 0 18px; font-size: 23px; }
 .file-card { display: grid; gap: 6px; margin-top: 14px; }.file-card strong { color: #fff; font-size: 16px; word-break: break-all; }.download { display: inline-block; margin-top: 16px; }.explanation { min-height: 520px; }.steps { display: grid; gap: 14px; }.steps div { display: flex; gap: 12px; align-items: flex-start; }.steps b { display: grid; flex: 0 0 auto; width: 30px; height: 30px; place-items: center; border-radius: 50%; background: #17325e; color: #7fb0ff; }.steps span { color: #c2cedf; }.note { margin-top: 22px; padding-top: 18px; border-top: 1px solid #203047; font-size: 13px; }
 @media (max-width: 860px) { header { flex-direction: column; align-items: flex-start; } .grid { grid-template-columns: 1fr; } .row { grid-template-columns: 1fr 1fr; } .qr-panel, .explanation { min-height: 0; } }
 @media (max-width: 560px) { .app { padding: 22px 14px 40px; } .panel { padding: 17px; border-radius: 16px; } .row { grid-template-columns: 1fr; } .actions { flex-direction: column; } .actions button, .download { width: 100%; text-align: center; } }
+:root .retransmit, :root .missing-chunks { display: grid; gap: 8px; margin-top: 16px; padding: 13px; border: 1px solid #274166; border-radius: 12px; background: #0a1526; }
+:root .retransmit label { display: grid; gap: 7px; color: #b9c6d8; font-size: 12px; }
+:root .retransmit textarea { min-height: 58px; width: 100%; resize: vertical; padding: 10px; border: 1px solid #2a3951; border-radius: 9px; background: #080f1c; color: #e7edf7; font: inherit; }
+:root .retransmit button { justify-self: start; }
+:root .missing-chunks strong { color: #9fc0ff; font-size: 13px; }
+:root .missing-chunks code { max-height: 90px; overflow: auto; padding: 9px; border-radius: 8px; background: #050b14; color: #d3e3ff; font-size: 12px; overflow-wrap: anywhere; }
+:root .missing-chunks span { color: #8ea0b8; font-size: 12px; }
