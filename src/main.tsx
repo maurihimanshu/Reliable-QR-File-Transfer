@@ -81,6 +81,13 @@ function splitChunks(bytes: Uint8Array, size: number): Uint8Array[] {
   return result;
 }
 
+function parseChunkNumbers(value: string, totalChunks: number): number[] | null {
+  const values = value.split(',').map((item) => item.trim()).filter(Boolean);
+  if (!values.length || values.some((item) => !/^\d+$/.test(item))) return null;
+  const unique = [...new Set(values.map(Number))].sort((a, b) => a - b);
+  return unique.every((index) => index >= 0 && index < totalChunks) ? unique : null;
+}
+
 function encodeFrame(frame: AnyFrame) {
   return JSON.stringify([PROTOCOL, VERSION, frame.t, frame.id, frame]);
 }
@@ -132,6 +139,7 @@ function Sender() {
   const [playing, setPlaying] = useState(false);
   const [round, setRound] = useState(1);
   const [index, setIndex] = useState(-1);
+  const [selectedChunks, setSelectedChunks] = useState('');
   const [qr, setQr] = useState('');
   const [status, setStatus] = useState('Select a file to prepare the transfer.');
   const timer = useRef<number | null>(null);
@@ -150,9 +158,12 @@ function Sender() {
     setQr(canvas.toDataURL('image/png'));
   };
 
-  const start = async () => {
+  const start = async (selected?: number[]) => {
     if (!prepared) return;
     setPlaying(true); setRound(1); setIndex(-1);
+    const indexes = selected ?? prepared.chunks.map((_, sequence) => sequence);
+    const selectedTransfer = Boolean(selected);
+    setStatus(selectedTransfer ? `Sending ${indexes.length} requested chunk${indexes.length === 1 ? '' : 's'} for ${rounds} round${rounds === 1 ? '' : 's'}…` : 'Sending complete transfer rounds…');
     let r = 1;
     let i = -1;
     const tick = async () => {
@@ -160,20 +171,31 @@ function Sender() {
       let frame: AnyFrame;
       if (i === -1) {
         frame = prepared.manifest;
-      } else if (i < prepared.chunks.length) {
-        frame = { t: 'D', v: VERSION, id: prepared.manifest.id, seq: i, total: prepared.chunks.length, payload: base64FromBytes(prepared.chunks[i]) };
+      } else if (i < indexes.length) {
+        const sequence = indexes[i];
+        frame = { t: 'D', v: VERSION, id: prepared.manifest.id, seq: sequence, total: prepared.chunks.length, payload: base64FromBytes(prepared.chunks[sequence]) };
       } else {
         frame = { t: 'E', v: VERSION, id: prepared.manifest.id, total: prepared.chunks.length, sha256: prepared.manifest.sha256 };
       }
       await renderFrame(encodeFrame(frame));
-      setRound(r); setIndex(i);
-      if (i >= prepared.chunks.length) {
-        if (r >= rounds) { setPlaying(false); setStatus(`Completed ${rounds} rounds.`); return; }
+      setRound(r); setIndex(i >= 0 && i < indexes.length ? indexes[i] : -1);
+      if (i >= indexes.length) {
+        if (r >= rounds) { setPlaying(false); setStatus(selectedTransfer ? `Completed ${rounds} selective retransmission round${rounds === 1 ? '' : 's'}.` : `Completed ${rounds} rounds.`); return; }
         r += 1; i = -1;
       } else i += 1;
       timer.current = window.setTimeout(tick, frameMs);
     };
     await tick();
+  };
+
+  const startSelected = () => {
+    if (!prepared) return;
+    const indexes = parseChunkNumbers(selectedChunks, prepared.manifest.totalChunks);
+    if (!indexes) {
+      setStatus(`Enter comma-separated chunk numbers from 0 to ${prepared.manifest.totalChunks - 1}.`);
+      return;
+    }
+    void start(indexes);
   };
 
   const stop = () => { if (timer.current) window.clearTimeout(timer.current); timer.current = null; setPlaying(false); setStatus('Paused. Start again to continue from the beginning of the configured rounds.'); };
@@ -187,11 +209,12 @@ function Sender() {
       <h2>Send a file</h2>
       <label className="drop"><input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} /><strong>{file ? file.name : 'Choose a file'}</strong><span>{file ? formatBytes(file.size) : `Maximum ${formatBytes(MAX_FILE_SIZE)}`}</span></label>
       <div className="row"><label>Rounds<input type="number" min="1" max="50" value={rounds} onChange={(e) => setRounds(Math.max(1, Number(e.target.value)))} /></label><label>QR interval (ms)<input type="number" min="80" step="20" value={frameMs} onChange={(e) => setFrameMs(Math.max(80, Number(e.target.value)))} /></label><label>Chunk bytes<input type="number" min="100" max="700" step="50" value={chunkSize} onChange={(e) => setChunkSize(Math.max(100, Math.min(700, Number(e.target.value))))} /></label></div>
-      <div className="actions"><button onClick={prepare} disabled={!file || playing}>Prepare transfer</button><button className="secondary" onClick={playing ? stop : start} disabled={!prepared}>{playing ? 'Pause' : 'Start rounds'}</button></div>
+      <div className="actions"><button onClick={prepare} disabled={!file || playing}>Prepare transfer</button><button className="secondary" onClick={playing ? stop : () => void start()} disabled={!prepared}>{playing ? 'Pause' : 'Start rounds'}</button></div>
       <p className="status">{status}</p>
       {prepared && <div className="stats"><span>{prepared.manifest.totalChunks.toLocaleString()} chunks</span><span>{formatBytes(prepared.manifest.compressedSize)} compressed</span><span>SHA-256 {prepared.manifest.sha256.slice(0, 12)}…</span></div>}
       {prepared && <div className="progress"><div style={{ width: `${progress}%` }} /></div>}
       {prepared && <div className="round-status">Round <b>{round}</b> / {rounds} • Frame <b>{Math.max(index, 0)}</b> / {prepared.manifest.totalChunks}</div>}
+      {prepared && <div className="retransmit"><label>Missing chunk numbers (comma-separated, zero-based)<textarea value={selectedChunks} onChange={(event) => setSelectedChunks(event.target.value)} placeholder="Example: 3, 17, 42" disabled={playing} /></label><button className="secondary" onClick={startSelected} disabled={playing || !selectedChunks.trim()}>Send selected chunks only</button></div>}
     </div>
     <div className="panel qr-panel"><div className="qr-wrap">{qr ? <img src={qr} alt="QR transfer frame" /> : <div className="placeholder">QR will appear here</div>}</div><p>Keep this QR area visible to the receiver. Repeated rounds intentionally send duplicates; the receiver counts each chunk only once.</p></div>
   </section>;
@@ -341,6 +364,9 @@ function Receiver() {
   useEffect(() => () => stop(), []);
 
   const missingCount = manifest ? manifest.totalChunks - received.size : 0;
+  const missingChunks = manifest && missingCount > 0 && missingCount <= Math.ceil(manifest.totalChunks * 0.05)
+    ? Array.from({ length: manifest.totalChunks }, (_, index) => index).filter((index) => !received.has(index))
+    : [];
 
   return <section className="grid">
     <div className="panel controls">
@@ -349,6 +375,7 @@ function Receiver() {
       <div className="actions"><button onClick={running ? stop : start} disabled={starting}>{running ? 'Stop camera' : starting ? 'Opening camera…' : 'Start rear camera'}</button><button className="secondary" onClick={() => { setManifest(null); manifestRef.current = null; setReceived(new Map()); setResultUrl(null); setStatus('Receiver reset. Ready for another transfer.'); }} >Reset</button></div>
       <p className="status">{status}</p>
       {manifest && <><div className="file-card"><strong>{manifest.name}</strong><span>{formatBytes(manifest.originalSize)} original • {manifest.totalChunks.toLocaleString()} chunks</span><span>Unique received: {received.size.toLocaleString()} • Missing: {missingCount.toLocaleString()}</span></div><div className="progress"><div style={{ width: `${progress}%` }} /></div><div className="round-status">Last chunk: <b>{lastIndex ?? '—'}</b> • Decoder attempts: <b>{scans.toLocaleString()}</b></div></>}
+      {missingChunks.length > 0 && <div className="missing-chunks"><strong>Last 5%: request these missing chunks</strong><code>{missingChunks.join(', ')}</code><span>Copy this zero-based list into the sender’s “Missing chunk numbers” box.</span></div>}
       {resultUrl && <a className="download" href={resultUrl} download={manifest?.name}>Download verified file</a>}
     </div>
     <div className="panel explanation"><h2>How reliability works</h2><div className="steps"><div><b>1</b><span>Sender sends every chunk in a round.</span></div><div><b>2</b><span>Receiver stores a chunk only once.</span></div><div><b>3</b><span>Duplicate chunks from later rounds are ignored.</span></div><div><b>4</b><span>When all chunks exist, the compressed stream is rebuilt.</span></div><div><b>5</b><span>SHA-256 of the original file must match before download.</span></div></div><p className="note">This version deliberately favors reliability over peak speed. It does not yet require a return channel or advanced FEC, so a sender can simply repeat the complete stream until the receiver reaches 100%.</p></div>
