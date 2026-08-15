@@ -50,3 +50,10 @@ For an offline deployment, run `npm run build` once on a connected machine, then
 4. Move file processing to streams/workers for large files.
 5. Add durable receiver state in IndexedDB so scanning can pause/resume safely.
 6. Add automated protocol tests with intentional frame loss, duplication, and reordering.
+
+## License
+
+Copyright (c) 2026 Himanshu Kumar
+
+This project is licensed under the MIT License.
+See the [LICENSE](LICENSE) file for details.
